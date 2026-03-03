@@ -8,6 +8,7 @@ import MediaViewer from './components/MediaViewer';
 import CreateFolderModal from './components/CreateFolderModal';
 import UploadProgress from './components/UploadProgress';
 import ConfirmDeleteModal from './components/ConfirmDeleteModal';
+import ConnectionErrorModal from './components/ConnectionErrorModal';
 
 import { s3Client, BUCKET_NAME } from './utils/minioClient';
 import { ListObjectsV2Command, PutObjectCommand, DeleteObjectsCommand, GetObjectCommand } from "@aws-sdk/client-s3";
@@ -42,7 +43,8 @@ function App() {
   const [isUploadsOpen, setIsUploadsOpen] = useState(false);
   const upRefs = useRef({});
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-  
+  const [connectionError, setConnectionError] = useState({ isError: false, message: '', hint: '' });
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
 
@@ -60,7 +62,8 @@ function App() {
         Delimiter: '/'       
       });
       const response = await s3Client.send(command);
-      
+      setConnectionError({ isError: false, message: '', hint: '' });
+
       const folders = (response.CommonPrefixes || []).map(p => ({
         id: p.Prefix,
         name: p.Prefix.replace(currentPath, '').replace('/', ''),
@@ -91,9 +94,44 @@ function App() {
       
       setFiles([...folders, ...fileList]);
     } catch (error) {
-      console.error("Error al obtener archivos:", error);
+      let uiMessage = "No pudimos establecer conexión con el servidor MinIO.";
+      let uiHint = "Revisa la consola (F12) para más detalles técnicos.";
+
+      // 1. Validar si faltan variables de entorno básicas
+      if (!import.meta.env.VITE_MINIO_ENDPOINT || !import.meta.env.VITE_MINIO_ACCESS_KEY) {
+        uiMessage = "Faltan variables de entorno (.env).";
+        uiHint = "💡 Pista: Asegúrate de que VITE_MINIO_ENDPOINT y las credenciales existan.";
+      } 
+      // 2. Errores específicos de AWS SDK / S3
+      else if (error.name === 'NoSuchBucket') {
+        uiMessage = `El bucket "${BUCKET_NAME}" no existe.`;
+        uiHint = "💡 Pista: Verifica VITE_MINIO_BUCKET_NAME o ve a la consola de MinIO a crearlo.";
+      } 
+      else if (error.name === 'InvalidAccessKeyId' || error.name === 'SignatureDoesNotMatch') {
+        uiMessage = "Credenciales de acceso incorrectas (Access/Secret Key).";
+        uiHint = "💡 Pista: Verifica los valores en tu archivo .env y reinicia el servidor Vite.";
+      } 
+      else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        uiMessage = "El servidor MinIO es inalcanzable.";
+        uiHint = "💡 Pista: El Endpoint es incorrecto, MinIO está apagado o falta configurar CORS.";
+      }
+
+      // Actualizar la UI
+      setConnectionError({ isError: true, message: uiMessage, hint: uiHint });
+
+      // Log detallado en la consola del navegador
+      console.group("🔴 [MaruFiles] Error Crítico: Conexión S3 / MinIO");
+      console.error("Nombre del Error:", error.name);
+      console.error(error);
+      console.info(uiHint);
+      
+      if (error.$metadata) {
+        console.warn("Metadata de AWS SDK:", error.$metadata);
+      }
+      console.groupEnd();
     } finally {
       setIsLoading(false);
+      setIsRetrying(false);
     }
   }, [currentPath]);
 
@@ -185,6 +223,11 @@ function App() {
       }
     }
     fetchFiles(); 
+  };
+
+  const handleRetryConnection = () => {
+    setIsRetrying(true);
+    fetchFiles();
   };
 
   /**
@@ -797,6 +840,12 @@ function App() {
         isOpen={isFolderModalOpen}
         onClose={() => setIsFolderModalOpen(false)}
         onCreate={finalizeCreateFolder}
+      />
+      <ConnectionErrorModal 
+        isOpen={connectionError.isError} 
+        errorDetails={connectionError}
+        onRetry={handleRetryConnection} 
+        isRetrying={isRetrying} 
       />
     </div>
   );
