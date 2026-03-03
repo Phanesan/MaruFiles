@@ -2,12 +2,9 @@ version: '3.8'
 
 services:
   file-manager:
-    # Nombre del contenedor para identificarlo fácilmente
     container_name: marufiles_app
     build:
-      # Contexto de construcción: el directorio donde se encuentra el Dockerfile
       context: .
-      # Argumentos pasados al Dockerfile durante la construcción de la imagen
       args:
         VITE_MINIO_ENDPOINT: ${VITE_MINIO_ENDPOINT}
         VITE_MINIO_ACCESS_KEY: ${VITE_MINIO_ACCESS_KEY}
@@ -15,5 +12,4 @@ services:
         VITE_MINIO_BUCKET_NAME: ${VITE_MINIO_BUCKET_NAME}
 
     ports:
-      # Mapea el puerto 8080 de tu máquina al puerto 80 del contenedor
-      - "8080:80"
+      - "3000:3000"
