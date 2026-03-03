@@ -14,11 +14,11 @@ ENV VITE_MINIO_SECRET_KEY=$VITE_MINIO_SECRET_KEY
 ENV VITE_MINIO_BUCKET_NAME=$VITE_MINIO_BUCKET_NAME
 
 COPY package.json package-lock.json ./
-RUN npm install
 
 COPY . .
 
-RUN npm run build
+COPY entrypoint.sh .
+RUN sed -i 's/\r$//g' entrypoint.sh && chmod +x entrypoint.sh
 
 FROM nginx:stable-alpine
 
@@ -26,7 +26,7 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 3000
+EXPOSE 5173
 
 # Comando para iniciar Nginx
 CMD ["nginx", "-g", "daemon off;"]

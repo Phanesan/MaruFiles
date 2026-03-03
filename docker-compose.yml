@@ -12,4 +12,4 @@ services:
         VITE_MINIO_BUCKET_NAME: ${VITE_MINIO_BUCKET_NAME}
 
     ports:
-      - "3000:3000"
+      - "5173:5173"
