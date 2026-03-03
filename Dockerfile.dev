@@ -2,22 +2,15 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-ARG VITE_MINIO_ENDPOINT
-ARG VITE_MINIO_ACCESS_KEY
-ARG VITE_MINIO_SECRET_KEY
-ARG VITE_MINIO_BUCKET_NAME
-
-ENV VITE_MINIO_ENDPOINT=$VITE_MINIO_ENDPOINT
-ENV VITE_MINIO_ACCESS_KEY=$VITE_MINIO_ACCESS_KEY
-ENV VITE_MINIO_SECRET_KEY=$VITE_MINIO_SECRET_KEY
-ENV VITE_MINIO_BUCKET_NAME=$VITE_MINIO_BUCKET_NAME
-
 COPY package.json package-lock.json ./
-RUN npm install
 
 COPY . .
 
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
 EXPOSE 5173
 
-# Ejecuta vite directamente para evitar problemas de PATH en algunos entornos
+ENTRYPOINT ["./entrypoint.sh"]
+
 CMD ["./node_modules/.bin/vite", "--host", "0.0.0.0"]
