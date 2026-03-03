@@ -1,4 +1,3 @@
-# Etapa 1: Construir la aplicación React
 FROM node:20-alpine AS build
 
 WORKDIR /app
@@ -15,10 +14,11 @@ ENV VITE_MINIO_BUCKET_NAME=$VITE_MINIO_BUCKET_NAME
 
 COPY package.json package-lock.json ./
 
+RUN npm install
+
 COPY . .
 
-COPY entrypoint.sh .
-RUN sed -i 's/\r$//g' entrypoint.sh && chmod +x entrypoint.sh
+RUN npm run build
 
 FROM nginx:stable-alpine
 
@@ -28,5 +28,4 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 5173
 
-# Comando para iniciar Nginx
 CMD ["nginx", "-g", "daemon off;"]
