@@ -1,29 +1,12 @@
-import { Film, FileText, CheckCircle, Folder } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import { generateVideoThumbnail } from '../utils/mediaUtils';
+import { Film, FileText, CheckCircle, Folder, Image as ImageIcon } from 'lucide-react';
 
 /**
  * @file FileItem.jsx
- * @description Componente que representa un archivo o carpeta en la cuadrícula de archivos.
- * @param {object} props - Propiedades del componente.
- * @param {object} props.file - El objeto de archivo o carpeta.
- * @param {boolean} props.isSelected - Indica si el elemento está seleccionado.
- * @param {function} props.onSelect - Función para seleccionar el elemento.
- * @param {function} props.onClick - Función para manejar el clic en el elemento.
- * @returns {JSX.Element} El componente de un elemento de archivo.
+ * @description Componente ultraligero que representa un archivo o carpeta en la cuadrícula.
  */
 export default function FileItem({ file, isSelected, onSelect, onClick }) {
-  const [thumbnail, setThumbnail] = useState(null);
   const isImage = file.type?.startsWith('image/');
   const isVideo = file.type?.startsWith('video/');
-
-  useEffect(() => {
-    if (isVideo && file.url) {
-      generateVideoThumbnail(file.url).then((thumbUrl) => {
-        if (thumbUrl) setThumbnail(thumbUrl);
-      });
-    }
-  }, [file, isVideo]);
 
   return (
     <div 
@@ -47,17 +30,19 @@ export default function FileItem({ file, isSelected, onSelect, onClick }) {
       <div className="flex-1 w-full min-h-0 flex items-center justify-center rounded-lg overflow-hidden bg-black/5 dark:bg-black/20 mb-2 border border-secondary/20 relative">
         {file.isFolder ? (
           <Folder className="text-accent fill-accent/20" size={64} strokeWidth={1.5} />
-        ) : isImage ? (
-          <img src={file.url} alt={file.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" loading="lazy" />
-        ) : isVideo && thumbnail ? (
+        ) : (isImage || isVideo) && file.thumbUrl ? (
           <>
-            <img src={thumbnail} alt={file.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" loading="lazy" />
-            <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity">
-              <Film className="text-white drop-shadow-md" size={32} />
-            </div>
+            <img src={file.thumbUrl} alt={file.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" loading="lazy" />
+            {isVideo && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity">
+                <Film className="text-white drop-shadow-md" size={32} />
+              </div>
+            )}
           </>
         ) : isVideo ? (
           <Film className="text-primary" size={40} strokeWidth={1.5} />
+        ) : isImage ? (
+          <ImageIcon className="text-primary" size={40} strokeWidth={1.5} />
         ) : (
           <FileText className="text-primary" size={40} strokeWidth={1.5} />
         )}

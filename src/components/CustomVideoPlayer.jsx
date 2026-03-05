@@ -1,12 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Settings, VideoOff, Download } from 'lucide-react';
 
 /**
  * @file CustomVideoPlayer.jsx
- * @description Componente de reproductor de video personalizado con controles personalizados.
- * @param {object} props - Propiedades del componente.
- * @param {string} props.src - La URL del video a reproducir.
- * @returns {JSX.Element} El componente del reproductor de video.
+ * @description Componente de reproductor de video personalizado con manejo de formatos no soportados.
  */
 export default function CustomVideoPlayer({ src }) {
   const videoRef = useRef(null);
@@ -25,6 +22,9 @@ export default function CustomVideoPlayer({ src }) {
 
   const [isDragging, setIsDragging] = useState(false);
   const [wasPlaying, setWasPlaying] = useState(false);
+  
+  // NUEVO ESTADO: Controla si el video no se puede reproducir
+  const [hasError, setHasError] = useState(false);
 
   const controlsTimeoutRef = useRef(null);
 
@@ -60,7 +60,7 @@ export default function CustomVideoPlayer({ src }) {
   };
 
   const handleProgress = () => {
-    if (videoRef.current.buffered.length > 0) {
+    if (videoRef.current && videoRef.current.buffered.length > 0) {
       const bufferedEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
       const total = videoRef.current.duration;
       setBuffered((bufferedEnd / total) * 100);
@@ -69,6 +69,12 @@ export default function CustomVideoPlayer({ src }) {
 
   const handleLoadedMetadata = () => {
     setDuration(videoRef.current.duration);
+  };
+
+  // NUEVA FUNCIÓN: Captura errores de decodificación (ej. archivos .avi, .wmv)
+  const handleError = () => {
+    setHasError(true);
+    setIsPlaying(false);
   };
 
   const handleSeekStart = () => {
@@ -129,14 +135,15 @@ export default function CustomVideoPlayer({ src }) {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.code === 'Space') {
+      // Evitar que el espacio funcione si hay un error
+      if (e.code === 'Space' && !hasError) {
         e.preventDefault(); 
         togglePlay();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [hasError]); // Dependencia actualizada
 
   const formatTime = (timeInSeconds) => {
     if (isNaN(timeInSeconds)) return "00:00";
@@ -144,6 +151,31 @@ export default function CustomVideoPlayer({ src }) {
     const s = Math.floor(timeInSeconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
+
+  // NUEVA UI: Qué mostrar si el formato no es soportado
+  if (hasError) {
+    return (
+      <div className="relative flex flex-col items-center justify-center bg-gray-900 rounded-xl overflow-hidden shadow-2xl w-[95vw] max-w-6xl aspect-video max-h-[85vh] border-4 border-secondary/50 text-center p-6">
+        <div className="bg-white/10 p-6 rounded-full mb-6">
+          <VideoOff size={64} className="text-gray-400" />
+        </div>
+        <h2 className="text-2xl font-bold text-white mb-2">Formato no soportado</h2>
+        <p className="text-gray-400 mb-8 max-w-md">
+          Tu navegador no puede reproducir este formato de video directamente en la web. Por favor, descárgalo para verlo en tu reproductor local.
+        </p>
+        <a 
+          href={src} 
+          download 
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-2 bg-accent hover:bg-accent/90 text-white px-6 py-3 rounded-xl font-medium transition-all hover:-translate-y-1 hover:shadow-lg active:translate-y-0"
+        >
+          <Download size={20} />
+          Descargar Video
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div 
@@ -162,6 +194,7 @@ export default function CustomVideoPlayer({ src }) {
         onTimeUpdate={handleTimeUpdate}
         onProgress={handleProgress}
         onLoadedMetadata={handleLoadedMetadata}
+        onError={handleError} // Escuchador nativo de errores del navegador
       />
 
       {!isPlaying && !isDragging && (

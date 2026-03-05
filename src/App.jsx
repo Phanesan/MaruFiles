@@ -9,6 +9,8 @@ import CreateFolderModal from './components/CreateFolderModal';
 import UploadProgress from './components/UploadProgress';
 import ConfirmDeleteModal from './components/ConfirmDeleteModal';
 import ConnectionErrorModal from './components/ConnectionErrorModal';
+import DiskFullModal from './components/DiskFullModal';
+import { generateVideoThumbnail, generateImageThumbnail, dataUrlToUint8Array } from './utils/mediaUtils';
 
 import { s3Client, BUCKET_NAME } from './utils/minioClient';
 import { ListObjectsV2Command, PutObjectCommand, DeleteObjectsCommand, GetObjectCommand } from "@aws-sdk/client-s3";
@@ -45,13 +47,12 @@ function App() {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [connectionError, setConnectionError] = useState({ isError: false, message: '', hint: '' });
   const [isRetrying, setIsRetrying] = useState(false);
-
+  const [isDiskFullModalOpen, setIsDiskFullModalOpen] = useState(false);
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
 
   /**
    * @function fetchFiles
-   * @description Obtiene los archivos y carpetas de la ruta actual desde el bucket de S3.
-   * @returns {void}
+   * @description Obtiene los archivos y carpetas, emparejando los thumbnails.
    */
   const fetchFiles = useCallback(async () => {
     try {
@@ -62,6 +63,7 @@ function App() {
         Delimiter: '/'       
       });
       const response = await s3Client.send(command);
+      
       setConnectionError({ isError: false, message: '', hint: '' });
 
       const folders = (response.CommonPrefixes || []).map(p => ({
@@ -71,64 +73,59 @@ function App() {
         type: 'folder'
       }));
 
-      const fileList = await Promise.all((response.Contents || [])
-        .filter(item => item.Key !== currentPath) 
-        .map(async (item) => {
-          const getCommand = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: item.Key });
-          const url = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
-          
-          const ext = item.Key.split('.').pop().toLowerCase();
-          let type = 'application/octet-stream';
-          if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) type = `image/${ext}`;
-          if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'].includes(ext)) type = `video/${ext}`;
+      const allItems = response.Contents || [];
+      const thumbItems = allItems.filter(item => item.Key.endsWith('_thumb.webp'));
+      const mainItems = allItems.filter(item => !item.Key.endsWith('_thumb.webp') && item.Key !== currentPath);
 
-          return {
-            id: item.Key,
-            name: item.Key.replace(currentPath, ''), 
-            type: type,
-            url: url,
-            size: item.Size
-          };
-        })
-      );
+      const fileList = await Promise.all(mainItems.map(async (item) => {
+        const getCommand = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: item.Key });
+        const url = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
+        
+        const ext = item.Key.split('.').pop().toLowerCase();
+        let type = 'application/octet-stream';
+        if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) type = `image/${ext}`;
+        if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', "wmv", "m4v"].includes(ext)) type = `video/${ext}`;
+
+        const expectedThumbKey = `${item.Key}_thumb.webp`;
+        const hasThumb = thumbItems.some(t => t.Key === expectedThumbKey);
+        
+        let thumbUrl = null;
+        if (hasThumb) {
+          const thumbCommand = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: expectedThumbKey });
+          thumbUrl = await getSignedUrl(s3Client, thumbCommand, { expiresIn: 3600 });
+        }
+
+        return {
+          id: item.Key,
+          name: item.Key.replace(currentPath, ''), 
+          type: type,
+          url: url,
+          thumbUrl: thumbUrl,
+          size: item.Size
+        };
+      }));
       
       setFiles([...folders, ...fileList]);
     } catch (error) {
       let uiMessage = "No pudimos establecer conexión con el servidor MinIO.";
       let uiHint = "Revisa la consola (F12) para más detalles técnicos.";
 
-      // 1. Validar si faltan variables de entorno básicas
       if (!import.meta.env.VITE_MINIO_ENDPOINT || !import.meta.env.VITE_MINIO_ACCESS_KEY) {
         uiMessage = "Faltan variables de entorno (.env).";
         uiHint = "💡 Pista: Asegúrate de que VITE_MINIO_ENDPOINT y las credenciales existan.";
-      } 
-      // 2. Errores específicos de AWS SDK / S3
-      else if (error.name === 'NoSuchBucket') {
+      } else if (error.name === 'NoSuchBucket') {
         uiMessage = `El bucket "${BUCKET_NAME}" no existe.`;
         uiHint = "💡 Pista: Verifica VITE_MINIO_BUCKET_NAME o ve a la consola de MinIO a crearlo.";
-      } 
-      else if (error.name === 'InvalidAccessKeyId' || error.name === 'SignatureDoesNotMatch') {
+      } else if (error.name === 'InvalidAccessKeyId' || error.name === 'SignatureDoesNotMatch') {
         uiMessage = "Credenciales de acceso incorrectas (Access/Secret Key).";
         uiHint = "💡 Pista: Verifica los valores en tu archivo .env y reinicia el servidor Vite.";
-      } 
-      else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+      } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
         uiMessage = "El servidor MinIO es inalcanzable.";
         uiHint = "💡 Pista: El Endpoint es incorrecto, MinIO está apagado o falta configurar CORS.";
       }
 
-      // Actualizar la UI
       setConnectionError({ isError: true, message: uiMessage, hint: uiHint });
-
-      // Log detallado en la consola del navegador
-      console.group("🔴 [MaruFiles] Error Crítico: Conexión S3 / MinIO");
-      console.error("Nombre del Error:", error.name);
-      console.error(error);
-      console.info(uiHint);
-      
-      if (error.$metadata) {
-        console.warn("Metadata de AWS SDK:", error.$metadata);
-      }
-      console.groupEnd();
+      console.error("🔴 [MaruFiles] Error Crítico:", error);
     } finally {
       setIsLoading(false);
       setIsRetrying(false);
@@ -193,6 +190,24 @@ function App() {
       setUploads(prev => [...prev, newUp]);
 
       try {
+        // --- PREPARAR THUMBNAIL ANTES DE SUBIR ---
+        const isImage = file.type.startsWith('image/');
+        const isVideo = file.type.startsWith('video/');
+        let thumbBlob = null;
+
+        if (isImage || isVideo) {
+          const objectUrl = URL.createObjectURL(file);
+          const thumbDataUrl = isImage 
+            ? await generateImageThumbnail(objectUrl) 
+            : await generateVideoThumbnail(objectUrl);
+            
+          if (thumbDataUrl) {
+            thumbBlob = await dataUrlToUint8Array(thumbDataUrl);
+          }
+          URL.revokeObjectURL(objectUrl);
+        }
+
+        // --- SUBIR ARCHIVO PRINCIPAL ---
         const uploadTask = new S3Upload({
           client: s3Client,
           params: {
@@ -213,11 +228,38 @@ function App() {
         });
 
         await uploadTask.done();
+
+        if (thumbBlob) {
+          const thumbUploadTask = new S3Upload({
+            client: s3Client,
+            params: {
+              Bucket: BUCKET_NAME,
+              Key: `${currentPath}${file.name}_thumb.webp`,
+              Body: thumbBlob,
+              ContentType: 'image/webp',
+            },
+          });
+          await thumbUploadTask.done();
+        }
+
         setUploads(prev => prev.map(u => u.id === upId ? { ...u, progress: 100, status: 'completed' } : u));
       } catch (err) {
-        if (err.name === 'AbortError' || err.message.includes('aborted')) {
+        const isDiskFull = 
+          err.$metadata?.httpStatusCode === 507 || 
+          err.name === 'XMinioStorageFull' || 
+          (err.message && (err.message.toLowerCase().includes('space') || err.message.toLowerCase().includes('storage full')));
+
+        if (isDiskFull) {
+          console.error("🔴 ERROR CRÍTICO: El disco del servidor MinIO está lleno.");
+          setIsDiskFullModalOpen(true);
+          setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
+          break; 
+        } 
+        
+        else if (err.name === 'AbortError' || err.message?.includes('aborted')) {
           setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'cancelled' } : u));
         } else {
+          console.error("Error de subida:", err);
           setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
         }
       }
@@ -272,8 +314,24 @@ function App() {
         await uploadTask.done();
         setUploads(prev => prev.map(u => u.id === upId ? { ...u, progress: 100, status: 'completed' } : u));
       } catch (err) {
-        console.log(err)
-        setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'cancelled' } : u));
+        const isDiskFull = 
+          err.$metadata?.httpStatusCode === 507 || 
+          err.name === 'XMinioStorageFull' || 
+          (err.message && (err.message.toLowerCase().includes('space') || err.message.toLowerCase().includes('storage full')));
+
+        if (isDiskFull) {
+          console.error("🔴 ERROR CRÍTICO: El disco del servidor MinIO está lleno.");
+          setIsDiskFullModalOpen(true);
+          setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
+          break; 
+        } 
+
+        else if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+          setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'cancelled' } : u));
+        } else {
+          console.error("Error de subida:", err);
+          setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
+        }
       }
     }
     fetchFiles(); 
@@ -291,10 +349,76 @@ function App() {
   const cancelAllUploads = () => uploads.forEach(u => { if (u.status === 'uploading') cancelUpload(u.id); });
   const clearCompletedUploads = () => setUploads(prev => prev.filter(u => u.status === 'uploading'));
 
+  const runThumbnailMigration = async () => {
+    if (!window.confirm("¿Iniciar migración de thumbnails? Esto analizará todo tu bucket.")) return;
+    setIsLoading(true);
+
+    try {
+      let allKeys = [];
+      let isTruncated = true;
+      let token = undefined;
+      
+      while (isTruncated) {
+        const cmd = new ListObjectsV2Command({ Bucket: BUCKET_NAME, ContinuationToken: token });
+        const res = await s3Client.send(cmd);
+        if (res.Contents) allKeys.push(...res.Contents.map(c => c.Key));
+        isTruncated = res.IsTruncated;
+        token = res.NextContinuationToken;
+      }
+
+      const mediaKeys = allKeys.filter(key => {
+        if (key.endsWith('_thumb.webp') || key.endsWith('/')) return false;
+        const ext = key.split('.').pop().toLowerCase();
+        return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'].includes(ext);
+      });
+
+      let processed = 0;
+
+      for (const key of mediaKeys) {
+        const thumbKey = `${key}_thumb.webp`;
+        
+        if (allKeys.includes(thumbKey)) continue;
+
+        console.log(`Generando thumbnail para: ${key}...`);
+        
+        const getCmd = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
+        const url = await getSignedUrl(s3Client, getCmd, { expiresIn: 3600 });
+        
+        const ext = key.split('.').pop().toLowerCase();
+        const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
+
+        const thumbDataUrl = isImage 
+          ? await generateImageThumbnail(url)
+          : await generateVideoThumbnail(url);
+
+        if (thumbDataUrl) {
+          const thumbBlob = await dataUrlToUint8Array(thumbDataUrl);
+          
+          const uploadCmd = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: thumbKey,
+            Body: thumbBlob,
+            ContentType: 'image/webp'
+          });
+          
+          await s3Client.send(uploadCmd);
+          processed++;
+        }
+      }
+
+      alert(`¡Migración completada! Se crearon ${processed} thumbnails nuevos.`);
+    } catch (error) {
+      console.error("Error en la migración:", error);
+      alert("Hubo un error en la migración. Revisa la consola.");
+    } finally {
+      setIsLoading(false);
+      fetchFiles(); 
+    }
+  };
+
   /**
    * @function executeDelete
-   * @description Elimina los archivos y carpetas seleccionados del bucket de S3.
-   * @returns {void}
+   * @description Elimina los archivos y carpetas seleccionados, limpiando thumbnails huérfanos.
    */
   const executeDelete = async () => {
     try {
@@ -319,6 +443,7 @@ function App() {
             
             if (response.Contents) {
               for (const item of response.Contents) {
+                // Al borrar una carpeta, se lleva TODO adentro, incluyendo los _thumb.webp
                 keysToDelete.push({ Key: item.Key });
               }
             }
@@ -326,7 +451,13 @@ function App() {
             continuationToken = response.NextContinuationToken;
           }
         } else {
+          // Agregar el archivo principal
           keysToDelete.push({ Key: selectedItem.id });
+          
+          // --- NUEVO: Si tiene thumbnail asociado, borrarlo también ---
+          if (selectedItem.thumbUrl) {
+            keysToDelete.push({ Key: `${selectedItem.id}_thumb.webp` });
+          }
         }
       }
 
@@ -658,6 +789,8 @@ function App() {
         </div>
         
         <div className="flex flex-wrap gap-3 items-center justify-center">
+          <button onClick={runThumbnailMigration} hidden className="text-white bg-red-500 px-4 py-2 rounded">Migrar DB</button>
+
           <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-secondary/20 text-primary transition-colors duration-300">
             {isDark ? <Sun size={20} /> : <Moon size={20} />}
           </button>
@@ -846,6 +979,10 @@ function App() {
         errorDetails={connectionError}
         onRetry={handleRetryConnection} 
         isRetrying={isRetrying} 
+      />
+      <DiskFullModal 
+        isOpen={isDiskFullModalOpen} 
+        onClose={() => setIsDiskFullModalOpen(false)} 
       />
     </div>
   );
