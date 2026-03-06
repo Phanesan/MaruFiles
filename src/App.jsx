@@ -52,31 +52,54 @@ function App() {
 
   /**
    * @function fetchFiles
-   * @description Obtiene los archivos y carpetas, emparejando los thumbnails.
+   * @description Obtiene TODOS los archivos y carpetas, sin importar si son más de 1000.
    */
   const fetchFiles = useCallback(async () => {
     try {
       setIsLoading(true);
-      const command = new ListObjectsV2Command({ 
-        Bucket: BUCKET_NAME,
-        Prefix: currentPath, 
-        Delimiter: '/'       
-      });
-      const response = await s3Client.send(command);
+      
+      let allCommonPrefixes = [];
+      let allContents = [];
+      let isTruncated = true;
+      let continuationToken = undefined;
+
+      // 1. Bucle para traer absolutamente todo de MinIO
+      while (isTruncated) {
+        const command = new ListObjectsV2Command({ 
+          Bucket: BUCKET_NAME,
+          Prefix: currentPath, 
+          Delimiter: '/',
+          ContinuationToken: continuationToken
+        });
+        
+        const response = await s3Client.send(command);
+        
+        if (response.CommonPrefixes) {
+          allCommonPrefixes.push(...response.CommonPrefixes);
+        }
+        if (response.Contents) {
+          allContents.push(...response.Contents);
+        }
+
+        isTruncated = response.IsTruncated;
+        continuationToken = response.NextContinuationToken;
+      }
       
       setConnectionError({ isError: false, message: '', hint: '' });
 
-      const folders = (response.CommonPrefixes || []).map(p => ({
+      // 2. Procesar las carpetas
+      const folders = allCommonPrefixes.map(p => ({
         id: p.Prefix,
         name: p.Prefix.replace(currentPath, '').replace('/', ''),
         isFolder: true,
         type: 'folder'
       }));
 
-      const allItems = response.Contents || [];
-      const thumbItems = allItems.filter(item => item.Key.endsWith('_thumb.webp'));
-      const mainItems = allItems.filter(item => !item.Key.endsWith('_thumb.webp') && item.Key !== currentPath);
+      // 3. Separar thumbnails y archivos principales
+      const thumbItems = allContents.filter(item => item.Key.endsWith('_thumb.webp'));
+      const mainItems = allContents.filter(item => !item.Key.endsWith('_thumb.webp') && item.Key !== currentPath);
 
+      // 4. Mapear y firmar URLs
       const fileList = await Promise.all(mainItems.map(async (item) => {
         const getCommand = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: item.Key });
         const url = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
@@ -84,7 +107,7 @@ function App() {
         const ext = item.Key.split('.').pop().toLowerCase();
         let type = 'application/octet-stream';
         if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) type = `image/${ext}`;
-        if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', "wmv", "m4v"].includes(ext)) type = `video/${ext}`;
+        if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv'].includes(ext)) type = `video/${ext}`;
 
         const expectedThumbKey = `${item.Key}_thumb.webp`;
         const hasThumb = thumbItems.some(t => t.Key === expectedThumbKey);
@@ -107,6 +130,7 @@ function App() {
       
       setFiles([...folders, ...fileList]);
     } catch (error) {
+      // ... (Aquí mantienes tu bloque de manejo de errores idéntico al que ya tenías)
       let uiMessage = "No pudimos establecer conexión con el servidor MinIO.";
       let uiHint = "Revisa la consola (F12) para más detalles técnicos.";
 
