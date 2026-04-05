@@ -2,7 +2,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 
 /**
  * @file minioClient.js
- * @description Cliente S3 para la conexión con MinIO.
+ * @description Cliente S3 para la conexión con MinIO optimizado para navegadores.
  */
 
 export const s3Client = new S3Client({

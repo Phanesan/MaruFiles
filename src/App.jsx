@@ -1,6 +1,6 @@
 import { useState, useContext, useEffect, useCallback, useRef } from 'react';
 import { ThemeContext } from './context/ThemeContext';
-import { Upload, Trash2, Moon, Sun, Download as DownloadIcon, Loader2, CheckSquare, Square, FolderPlus, ChevronRight, Home, FolderUp, Archive, UploadCloud } from 'lucide-react';
+import { Upload, Trash2, Moon, Sun, Download as DownloadIcon, Loader2, CheckSquare, Square, FolderPlus, ChevronRight, Home, FolderUp, Archive, UploadCloud, FolderInput, Pencil, Search, X } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import FileItem from './components/FileItem';
 import DownloadProgress from './components/DownloadProgress';
@@ -10,10 +10,12 @@ import UploadProgress from './components/UploadProgress';
 import ConfirmDeleteModal from './components/ConfirmDeleteModal';
 import ConnectionErrorModal from './components/ConnectionErrorModal';
 import DiskFullModal from './components/DiskFullModal';
+import MoveModal from './components/MoveModal';
+import RenameModal from './components/RenameModal';
 import { generateVideoThumbnail, generateImageThumbnail, dataUrlToUint8Array } from './utils/mediaUtils';
 
 import { s3Client, BUCKET_NAME } from './utils/minioClient';
-import { ListObjectsV2Command, PutObjectCommand, DeleteObjectsCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { Upload as S3Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import JSZip from 'jszip';
@@ -37,6 +39,7 @@ function App() {
   const [files, setFiles] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
   const [downloads, setDownloads] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const dlRefs = useRef({});
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
   const [mediaPreview, setMediaPreview] = useState(null);
@@ -49,6 +52,8 @@ function App() {
   const [isRetrying, setIsRetrying] = useState(false);
   const [isDiskFullModalOpen, setIsDiskFullModalOpen] = useState(false);
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
+  const [isMoveModalOpen, setIsMoveModalOpen] = useState(false);
+  const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
 
   /**
    * @function fetchFiles
@@ -169,6 +174,14 @@ function App() {
       }
     }
   }, [previewId, files]);
+
+  useEffect(() => {
+    setSearchQuery('');
+  }, [currentPath]);
+
+  const filteredFiles = files.filter(file => 
+    file.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   /**
    * @function finalizeCreateFolder
@@ -467,7 +480,6 @@ function App() {
             
             if (response.Contents) {
               for (const item of response.Contents) {
-                // Al borrar una carpeta, se lleva TODO adentro, incluyendo los _thumb.webp
                 keysToDelete.push({ Key: item.Key });
               }
             }
@@ -513,6 +525,165 @@ function App() {
   };
 
   /**
+   * @function executeMove
+   * @description Mueve los archivos/carpetas a un nuevo destino (Copia profunda + Eliminación).
+   */
+  const executeMove = async (destinationPath) => {
+    setIsMoveModalOpen(false);
+    setIsLoading(true);
+
+    const moveSingleFile = async (oldKey, newKey) => {
+      const sourceKey = encodeURIComponent(oldKey).replace(/%2F/g, '/');
+      await s3Client.send(new CopyObjectCommand({
+        Bucket: BUCKET_NAME,
+        CopySource: `${BUCKET_NAME}/${sourceKey}`,
+        Key: newKey
+      }));
+
+      await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: oldKey }));
+
+      const expectedThumb = `${oldKey}_thumb.webp`;
+      try {
+        const thumbSource = encodeURIComponent(expectedThumb).replace(/%2F/g, '/');
+        await s3Client.send(new CopyObjectCommand({
+          Bucket: BUCKET_NAME,
+          CopySource: `${BUCKET_NAME}/${thumbSource}`,
+          Key: `${newKey}_thumb.webp`
+        }));
+        await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: expectedThumb }));
+      } catch (e) {
+        console.info(e)
+      }
+    };
+
+    try {
+      for (const id of selectedIds) {
+        const item = files.find(f => f.id === id);
+        if (!item) continue;
+
+        if (item.isFolder) {
+          const folderName = item.name; 
+          const newFolderPrefix = `${destinationPath}${folderName}/`;
+
+          let isTruncated = true;
+          let token = undefined;
+          
+          while (isTruncated) {
+            const listCmd = new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: item.id, ContinuationToken: token });
+            const res = await s3Client.send(listCmd);
+            
+            if (res.Contents) {
+              for (const object of res.Contents) {
+                const subPath = object.Key.replace(item.id, '');
+                const newObjectKey = `${newFolderPrefix}${subPath}`;
+                
+                const sourceKey = encodeURIComponent(object.Key).replace(/%2F/g, '/');
+                await s3Client.send(new CopyObjectCommand({
+                  Bucket: BUCKET_NAME,
+                  CopySource: `${BUCKET_NAME}/${sourceKey}`,
+                  Key: newObjectKey
+                }));
+                await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: object.Key }));
+              }
+            }
+            isTruncated = res.IsTruncated;
+            token = res.NextContinuationToken;
+          }
+        } else {
+          const newKey = `${destinationPath}${item.name}`;
+          await moveSingleFile(item.id, newKey);
+        }
+      }
+
+      setSelectedIds([]);
+      fetchFiles();
+    } catch (error) {
+      console.error("Error al mover archivos:", error);
+      alert("Hubo un error al intentar mover algunos archivos.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /**
+   * @function executeRename
+   * @description Renombra un archivo o carpeta copiándolo al nuevo nombre y borrando el original.
+   */
+  const executeRename = async (newName) => {
+    setIsRenameModalOpen(false);
+    setIsLoading(true);
+
+    const item = files.find(f => f.id === selectedIds[0]);
+    if (!item) return;
+
+    try {
+      if (item.isFolder) {
+        const oldPrefix = item.id; 
+        const newPrefix = `${currentPath}${newName}/`;
+
+        let isTruncated = true;
+        let token = undefined;
+        
+        while (isTruncated) {
+          const listCmd = new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: oldPrefix, ContinuationToken: token });
+          const res = await s3Client.send(listCmd);
+          
+          if (res.Contents) {
+            for (const object of res.Contents) {
+              const newObjectKey = object.Key.replace(oldPrefix, newPrefix);
+              const sourceKey = encodeURIComponent(object.Key).replace(/%2F/g, '/');
+              
+              await s3Client.send(new CopyObjectCommand({
+                Bucket: BUCKET_NAME,
+                CopySource: `${BUCKET_NAME}/${sourceKey}`,
+                Key: newObjectKey
+              }));
+              await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: object.Key }));
+            }
+          }
+          isTruncated = res.IsTruncated;
+          token = res.NextContinuationToken;
+        }
+      } else {
+        const oldKey = item.id;
+        const newKey = `${currentPath}${newName}`;
+        const sourceKey = encodeURIComponent(oldKey).replace(/%2F/g, '/');
+
+        await s3Client.send(new CopyObjectCommand({
+          Bucket: BUCKET_NAME,
+          CopySource: `${BUCKET_NAME}/${sourceKey}`,
+          Key: newKey
+        }));
+        await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: oldKey }));
+
+        if (item.thumbUrl) {
+          const oldThumbKey = `${oldKey}_thumb.webp`;
+          const newThumbKey = `${newKey}_thumb.webp`;
+          const thumbSource = encodeURIComponent(oldThumbKey).replace(/%2F/g, '/');
+          try {
+            await s3Client.send(new CopyObjectCommand({
+              Bucket: BUCKET_NAME,
+              CopySource: `${BUCKET_NAME}/${thumbSource}`,
+              Key: newThumbKey
+            }));
+            await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: oldThumbKey }));
+          } catch (e) {
+            console.info(e);
+          }
+        }
+      }
+
+      setSelectedIds([]);
+      fetchFiles(); 
+    } catch (error) {
+      console.error("Error al renombrar:", error);
+      alert("Hubo un error al intentar renombrar el elemento.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /**
    * @function toggleSelection
    * @description Agrega o elimina un archivo de la lista de seleccionados.
    * @param {string} id - El ID del archivo a seleccionar/deseleccionar.
@@ -528,10 +699,10 @@ function App() {
    * @returns {void}
    */
   const handleSelectAll = () => {
-    if (selectedIds.length === files.length) {
+    if (selectedIds.length === filteredFiles.length) {
       setSelectedIds([]);
     } else {
-      setSelectedIds(files.map(f => f.id));
+      setSelectedIds(filteredFiles.map(f => f.id));
     }
   };
 
@@ -811,6 +982,28 @@ function App() {
           <img src={logo} alt='MaruFiles' style={{ width: '80px'}}></img>
           <h1 className="text-2xl font-bold tracking-tight">MaruFiles</h1>
         </div>
+
+        <div className="relative flex-1 w-full max-w-xl mx-0 md:mx-6 order-last md:order-none mt-4 md:mt-0">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search size={18} className="text-secondary" />
+          </div>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Buscar en esta carpeta..."
+            autoComplete="off"
+            className="block w-full pl-10 pr-10 py-2.5 border border-secondary/20 rounded-xl leading-5 bg-secondary/5 text-theme placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-accent focus:border-accent transition-all duration-300"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute inset-y-0 right-0 pr-3 flex items-center text-secondary hover:text-accent transition-colors"
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
         
         <div className="flex flex-wrap gap-3 items-center justify-center">
           <button onClick={runThumbnailMigration} hidden className="text-white bg-red-500 px-4 py-2 rounded">Migrar DB</button>
@@ -895,8 +1088,8 @@ function App() {
         <div className="bg-secondary/20 border border-secondary rounded-lg p-3 mb-6 flex flex-wrap gap-4 items-center animate-fade-in shadow-lg">
           
           <button onClick={handleSelectAll} className="flex items-center gap-2 text-theme hover:text-accent font-medium transition-colors">
-            {selectedIds.length === files.length ? <CheckSquare size={20} /> : <Square size={20} />}
-            <span className="hidden sm:inline">{selectedIds.length === files.length ? 'Deseleccionar' : 'Seleccionar todo'}</span>
+            {selectedIds.length === filteredFiles.length ? <CheckSquare size={20} /> : <Square size={20} />}
+            <span className="hidden sm:inline">{selectedIds.length === filteredFiles.length ? 'Deseleccionar' : 'Seleccionar todo'}</span>
           </button>
           
           <div className="w-px h-6 bg-secondary/50 mx-2 hidden sm:block"></div>
@@ -918,7 +1111,25 @@ function App() {
             >
               <Archive size={18} /> <span className="hidden md:inline">Descargar ZIP</span>
             </button>
+
+            {selectedIds.length === 1 && (
+              <button 
+                onClick={() => setIsRenameModalOpen(true)}
+                className="flex items-center gap-2 bg-emerald-500 text-white hover:bg-emerald-600 px-3 py-1.5 rounded-lg transition-all shadow-md"
+                title="Renombrar elemento"
+              >
+                <Pencil size={18} /> <span className="hidden md:inline">Renombrar</span>
+              </button>
+            )}
             
+            <button 
+              onClick={() => setIsMoveModalOpen(true)}
+              className="flex items-center gap-2 bg-indigo-500 text-white hover:bg-indigo-600 px-3 py-1.5 rounded-lg transition-all shadow-md"
+              title="Mover a otra carpeta"
+            >
+              <FolderInput size={18} /> <span className="hidden md:inline">Mover</span>
+            </button>
+
             <button 
               onClick={() => setIsDeleteModalOpen(true)}
               className="flex items-center gap-2 text-red-500 hover:text-red-600 hover:bg-red-500/10 px-3 py-1.5 rounded-lg transition-all"
@@ -942,9 +1153,17 @@ function App() {
           <h2 className="text-xl font-semibold text-theme">Carpeta Vacía</h2>
           <p className="text-sm text-primary mt-2">Sube archivos o crea una nueva carpeta aquí</p>
         </div>
+      ) : filteredFiles.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20 h-64 border-2 border-dashed border-secondary/50 rounded-2xl bg-secondary/5">
+          <div className="bg-secondary/20 p-4 rounded-full mb-4">
+            <Search size={32} className="text-secondary" />
+          </div>
+          <h2 className="text-xl font-semibold text-theme">Sin resultados</h2>
+          <p className="text-sm text-secondary mt-2">No se encontró "{searchQuery}" en esta carpeta.</p>
+        </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
-          {files.map(file => (
+          {filteredFiles.map(file => (
             <FileItem 
               key={file.id} 
               file={file} 
@@ -965,6 +1184,7 @@ function App() {
           ))}
         </div>
       )}
+
 
       <MediaViewer file={mediaPreview} onClose={closePreview} />
       <DownloadProgress 
@@ -1007,6 +1227,18 @@ function App() {
       <DiskFullModal 
         isOpen={isDiskFullModalOpen} 
         onClose={() => setIsDiskFullModalOpen(false)} 
+      />
+      <MoveModal 
+        isOpen={isMoveModalOpen}
+        onClose={() => setIsMoveModalOpen(false)}
+        onConfirm={executeMove}
+        selectedFiles={files.filter(f => selectedIds.includes(f.id))}
+      />
+      <RenameModal 
+        isOpen={isRenameModalOpen}
+        onClose={() => setIsRenameModalOpen(false)}
+        onConfirm={executeRename}
+        currentItem={files.find(f => f.id === selectedIds[0])}
       />
     </div>
   );
