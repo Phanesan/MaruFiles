@@ -54,6 +54,25 @@ function App() {
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
   const [isMoveModalOpen, setIsMoveModalOpen] = useState(false);
   const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+  const [isGlobalDragOver, setIsGlobalDragOver] = useState(false);
+
+  const handleGlobalDragOver = (e) => {
+    e.preventDefault();
+    setIsGlobalDragOver(true);
+  };
+
+  const handleGlobalDragLeave = (e) => {
+    e.preventDefault();
+    setIsGlobalDragOver(false);
+  };
+
+  const handleGlobalDrop = (e) => {
+    e.preventDefault();
+    setIsGlobalDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFilesUpload(Array.from(e.dataTransfer.files), currentPath);
+    }
+  };
 
   /**
    * @function fetchFiles
@@ -210,15 +229,12 @@ function App() {
   };
 
   /**
-   * @function handleFileUpload
+   * @function processFilesUpload
    * @description Sube archivos al bucket de S3 con seguimiento del progreso.
-   * @param {Event} e - El evento del input de tipo archivo.
    * @returns {void}
    */
-  const handleFileUpload = async (e) => {
-    const uploadedFiles = Array.from(e.target.files);
+  const processFilesUpload = async (uploadedFiles, targetPath) => {
     if (uploadedFiles.length === 0) return;
-    
     setIsUploadsOpen(true);
 
     for (const file of uploadedFiles) {
@@ -227,10 +243,9 @@ function App() {
       setUploads(prev => [...prev, newUp]);
 
       try {
-        // --- PREPARAR THUMBNAIL ANTES DE SUBIR ---
         const isImage = file.type.startsWith('image/');
         const isVideo = file.type.startsWith('video/');
-        let thumbBlob = null;
+        let thumbBytes = null;
 
         if (isImage || isVideo) {
           const objectUrl = URL.createObjectURL(file);
@@ -239,17 +254,16 @@ function App() {
             : await generateVideoThumbnail(objectUrl);
             
           if (thumbDataUrl) {
-            thumbBlob = await dataUrlToUint8Array(thumbDataUrl);
+            thumbBytes = dataUrlToUint8Array(thumbDataUrl);
           }
           URL.revokeObjectURL(objectUrl);
         }
 
-        // --- SUBIR ARCHIVO PRINCIPAL ---
         const uploadTask = new S3Upload({
           client: s3Client,
           params: {
             Bucket: BUCKET_NAME,
-            Key: `${currentPath}${file.name}`,
+            Key: `${targetPath}${file.name}`,
             Body: file,
             ContentType: file.type,
           },
@@ -266,13 +280,13 @@ function App() {
 
         await uploadTask.done();
 
-        if (thumbBlob) {
+        if (thumbBytes) {
           const thumbUploadTask = new S3Upload({
             client: s3Client,
             params: {
               Bucket: BUCKET_NAME,
-              Key: `${currentPath}${file.name}_thumb.webp`,
-              Body: thumbBlob,
+              Key: `${targetPath}${file.name}_thumb.webp`,
+              Body: thumbBytes,
               ContentType: 'image/webp',
             },
           });
@@ -281,22 +295,16 @@ function App() {
 
         setUploads(prev => prev.map(u => u.id === upId ? { ...u, progress: 100, status: 'completed' } : u));
       } catch (err) {
-        const isDiskFull = 
-          err.$metadata?.httpStatusCode === 507 || 
-          err.name === 'XMinioStorageFull' || 
-          (err.message && (err.message.toLowerCase().includes('space') || err.message.toLowerCase().includes('storage full')));
+        const isDiskFull = err.$metadata?.httpStatusCode === 507 || err.name === 'XMinioStorageFull' || (err.message && (err.message.toLowerCase().includes('space') || err.message.toLowerCase().includes('storage full')));
 
         if (isDiskFull) {
           console.error("🔴 ERROR CRÍTICO: El disco del servidor MinIO está lleno.");
           setIsDiskFullModalOpen(true);
           setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
           break; 
-        } 
-        
-        else if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+        } else if (err.name === 'AbortError' || err.message?.includes('aborted')) {
           setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'cancelled' } : u));
         } else {
-          console.error("Error de subida:", err);
           setUploads(prev => prev.map(u => u.id === upId ? { ...u, status: 'error' } : u));
         }
       }
@@ -975,7 +983,22 @@ function App() {
   const pathParts = currentPath.split('/').filter(Boolean);
 
   return (
-    <div className="min-h-screen bg-theme text-theme p-4 md:p-8">
+    <div 
+      className={`min-h-screen text-theme p-4 md:p-8 transition-colors duration-300 ${isGlobalDragOver ? 'bg-accent/5' : 'bg-theme'}`}
+      onDragOver={handleGlobalDragOver}
+      onDragLeave={handleGlobalDragLeave}
+      onDrop={handleGlobalDrop}
+    > 
+      {isGlobalDragOver && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-theme/80 backdrop-blur-sm pointer-events-none border-4 border-dashed border-accent m-4 md:m-8 rounded-3xl">
+          <div className="flex flex-col items-center gap-4 text-accent animate-bounce">
+            <UploadCloud size={64} />
+            <h2 className="text-3xl font-bold">Suelta los archivos aquí</h2>
+            <p className="text-lg">Se subirán a la carpeta actual</p>
+          </div>
+        </div>
+      )}
+
       <header className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         
         <div className="flex items-center gap-2 text-accent transition-transform hover:scale-105 cursor-default">
@@ -1055,7 +1078,15 @@ function App() {
           <label className="bg-accent text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-all duration-300 cursor-pointer hover:bg-accent/90 hover:-translate-y-1 hover:shadow-lg hover:shadow-accent/40 active:translate-y-0 active:shadow-none">
             <Upload size={18} />
             <span className="hidden sm:inline">Subir Archivos</span>
-            <input type="file" multiple className="hidden" onChange={handleFileUpload} />
+            <input 
+              type="file" 
+              multiple 
+              className="hidden" 
+              onChange={(e) => {
+                processFilesUpload(Array.from(e.target.files), currentPath);
+                e.target.value = null;
+              }} 
+            />
           </label>
         </div>
       </header>
